@@ -52,7 +52,7 @@ function hostFail() {
 function hostAlready() {
   var m = document.getElementById("state");
   if (m) {
-    m.innerHTML = "GoldHEN is Already Loaded ...";
+    m.innerHTML = "GoldHEN is Already Loaded Press BACK to EXIT...";
     m.style.setProperty("color", "yellow", "important"); 
   }
 }
